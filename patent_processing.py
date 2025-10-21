@@ -188,26 +188,102 @@ META_PATTERNS = {
 }
 
 
+def _normalize_kr_date(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    s = raw.strip()
+    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    m = re.search(r"(\d{4})[\./-](\d{1,2})[\./-](\d{1,2})", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    m = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    return None
+
+
+_CODE_RE = re.compile(r"\b[A-H][0-9]{2}[A-Z]\s?[0-9]+/[0-9]+\b")
+
+
+def _extract_kr_metadata(text: str) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    if "대한민국특허청" in text or "(KR)" in text:
+        meta["jurisdiction"] = "KR"
+
+    # Publication/Application numbers and dates
+    m = re.search(r"\(11\)\s*공개번호\s*([0-9]{2,4}-\d{5,})", text)
+    if m:
+        meta["publication_number"] = m.group(1)
+    m = re.search(r"\(43\)\s*공개일자\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_kr_date(m.group(1))
+        if iso:
+            meta["publication_date"] = iso
+
+    m = re.search(r"\(21\)\s*출원번호\s*([0-9]{2,4}-\d{5,})", text)
+    if m:
+        meta["application_number"] = m.group(1)
+    m = re.search(r"\(22\)\s*출원일자\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_kr_date(m.group(1))
+        if iso:
+            meta["application_date"] = iso
+
+    # Title
+    m = re.search(r"\(54\)\s*발명의\s*명칭\s*([^\n]+)", text)
+    if m:
+        meta["title"] = m.group(1).strip()
+
+    # Assignee (Applicant) and Inventors (line after labels)
+    m = re.search(r"\(71\)\s*출원인\s*([^\n]+)", text)
+    if m:
+        meta["assignee"] = m.group(1).strip()
+    m = re.search(r"\(72\)\s*발명자\s*([^\n]+)", text)
+    if m:
+        invent_raw = m.group(1).strip()
+        # split by comma/ideographic comma or 2+ spaces
+        parts = re.split(r"[,、，]|\s{2,}", invent_raw)
+        meta["inventors"] = [p.strip() for p in parts if p.strip()]
+
+    # IPC codes from (51) block
+    m = re.search(r"\(51\)[\s\S]{0,600}", text)
+    if m:
+        ipc_block = m.group(0)
+        codes = _CODE_RE.findall(ipc_block)
+        if codes:
+            meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+
+    # CPC codes from (52) block
+    m = re.search(r"\(52\)[\s\S]{0,600}", text)
+    if m:
+        cpc_block = m.group(0)
+        codes = _CODE_RE.findall(cpc_block)
+        if codes:
+            meta["cpc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+
+    return meta
+
+
 def extract_basic_metadata(text: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {
-        "jurisdiction": None,
-        "publication_number": None,
-        "application_number": None,
-        "title": None,
-        "abstract": None,
-        "assignee": None,
-        "inventors": None,
-        "publication_date": None,
-        "application_date": None,
-        "priority_numbers": None,
-        "ipc_codes": None,
-        "cpc_codes": None,
-    }
+    # Prefer KR-specific extraction if possible
+    kr_meta = _extract_kr_metadata(text)
+    if kr_meta:
+        return kr_meta
+
+    # Fallback: simple English patterns
+    meta: Dict[str, Any] = {}
     for k, pat in META_PATTERNS.items():
         m = re.search(pat, text, flags=re.I)
         if m:
             meta[k] = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
-    return meta
+
+    # prune empty
+    return {k: v for k, v in meta.items() if v not in (None, "", [], {})}
 
 
 def convert_pdf_bytes_to_patent_json(
@@ -241,7 +317,7 @@ def convert_pdf_bytes_to_patent_json(
 
     chunks = chunk_for_rag(sections, claims, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
 
-    # Basic metadata extraction
+    # Metadata extraction (KR-aware, pruned)
     meta = extract_basic_metadata(cleaned)
 
     # Build document JSON
