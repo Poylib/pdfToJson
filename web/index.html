@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF → JSON (특허 RAG)</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans KR', Arial, sans-serif; margin: 24px; }
+      .row { display: flex; gap: 24px; align-items: flex-start; }
+      .col { flex: 1; min-width: 320px; }
+      pre { background: #f6f8fa; padding: 12px; overflow: auto; border-radius: 6px; }
+      .muted { color: #666; font-size: 12px; }
+      .btn { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; background: #fff; }
+      .btn.primary { background: #2563eb; color: white; border-color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>📄 PDF → JSON (특허 RAG 정적)</h1>
+    <p class="muted">브라우저에서 PDF 텍스트를 추출해 특허 스키마로 변환합니다. 서버/설치 불필요.</p>
+
+    <div class="row">
+      <div class="col">
+        <h3>파일 업로드</h3>
+        <input type="file" id="fileInput" accept="application/pdf" multiple />
+        <div style="margin-top:8px;">
+          <button class="btn primary" id="convertBtn">변환 시작</button>
+          <button class="btn" id="downloadZipBtn" disabled>ZIP 다운로드</button>
+        </div>
+        <div id="status" class="muted" style="margin-top:8px;"></div>
+      </div>
+      <div class="col">
+        <h3>문서 JSON</h3>
+        <pre id="docPreview">업로드 후 결과가 표시됩니다.</pre>
+      </div>
+      <div class="col">
+        <h3>청크 JSONL</h3>
+        <pre id="chunksPreview">업로드 후 결과가 표시됩니다.</pre>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
