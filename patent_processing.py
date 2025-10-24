@@ -30,12 +30,17 @@ def clean_text(text: str) -> str:
 
 
 SECTION_HEADERS: List[Tuple[str, str]] = [
-    ("ABSTRACT", r"\babstract\b|요약"),
-    ("CLAIMS", r"\bclaims?\b|\bwhat\s+is\s+claimed\b|청구항"),
-    ("DESCRIPTION", r"\b(description|detailed\s+description|specification)\b|설명서|상세한 설명"),
-    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention)\b|배경"),
-    ("SUMMARY", r"\bsummary\b|요약(서)?"),
-    ("DRAWINGS", r"\bbrief\s+description\s+of\s+the\s+drawings\b|도면의 간단한 설명"),
+    ("ABSTRACT", r"\babstract\b|요약|要約"),
+    # JP: 特許請求の範囲 / 請求項
+    ("CLAIMS", r"\bclaims?\b|\bwhat\s+is\s+claimed\b|청구항|特許請求の範囲|請求項"),
+    # JP: 発明の詳細な説明 / 実施形態 / 実施例
+    ("DESCRIPTION", r"\b(description|detailed\s+description|specification)\b|설명서|상세한 설명|発明の詳細な説明|実施形態|実施例"),
+    # JP: 技術分野 / 背景技術
+    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention)\b|배경|技術分野|背景技術"),
+    # JP: 課題 / 解決手段 / 効果 → 요약적 성격인 섹션도 포함
+    ("SUMMARY", r"\bsummary\b|요약(서)?|課題(を解決するための手段)?|発明の効果"),
+    # JP: 図面の簡単な説明
+    ("DRAWINGS", r"\bbrief\s+description\s+of\s+the\s+drawings\b|도면의 간단한 설명|図面の簡単な説明"),
 ]
 
 
@@ -73,17 +78,38 @@ def split_sections(full_text: str) -> List[Dict[str, Any]]:
 
 CLAIM_LINE = re.compile(r'^\s*(?:claim\s*)?(\d+)[\.\)]\s+', re.I)
 KO_CLAIM_LINE = re.compile(r"^\s*청구항\s*(\d+)\s*[\.）)]?\s*")
+# JP: 【請求項1】 / 請求項１. / 請求項1） (全角数字 포함)
+JA_CLAIM_LINE = re.compile(r"^\s*[【\[\(（]?\s*請求項\s*([0-9０-９]+)\s*[】\]\)）]?[\.．）)]?\s*")
+
+def _normalize_fullwidth_digits(s: str) -> str:
+    # Convert fullwidth digits to ASCII
+    return s.translate(str.maketrans({
+        '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+        '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+    }))
+
+def _normalize_fullwidth_punct(s: str) -> str:
+    """Normalize fullwidth punctuation and symbols common in JP patents.
+
+    - Convert fullwidth dot/percent/slash/minus/comma to ASCII
+    - Keep content otherwise unchanged
+    """
+    table = str.maketrans({
+        '．': '.', '，': ',', '％': '%', '／': '/', '－': '-',
+    })
+    return _normalize_fullwidth_digits(s).translate(table)
 
 
 def extract_claims(claims_text: str) -> List[Dict[str, Any]]:
     claims: List[Dict[str, Any]] = []
     cur: Optional[Dict[str, Any]] = None
     for ln in claims_text.splitlines():
-        m = CLAIM_LINE.match(ln) or KO_CLAIM_LINE.match(ln)
+        m = CLAIM_LINE.match(ln) or KO_CLAIM_LINE.match(ln) or JA_CLAIM_LINE.match(ln)
         if m:
             if cur:
                 claims.append(cur)
-            cur = {"num": int(m.group(1)), "text": ln[m.end():].strip()}
+            num_str = _normalize_fullwidth_digits(m.group(1))
+            cur = {"num": int(num_str), "text": ln[m.end():].strip()}
         elif cur:
             cur["text"] += "\n" + ln.strip()
     if cur:
@@ -91,8 +117,18 @@ def extract_claims(claims_text: str) -> List[Dict[str, Any]]:
 
     # Basic dependency detection (references to other claims)
     for c in claims:
+        # English/Korean references
         refs = re.findall(r"(?:claim|제)\s*([0-9]+)", c["text"], flags=re.I)
-        c["dependencies"] = sorted({int(x) for x in refs if int(x) != c["num"]})
+        # Japanese references: 請求項n / 第n項
+        refs += [
+            _normalize_fullwidth_digits(x)
+            for x in re.findall(r"請求項\s*([0-9０-９]+)", c["text"]) + re.findall(r"第\s*([0-9０-９]+)\s*項", c["text"])
+        ]
+        try:
+            nums = {int(x) for x in refs}
+        except Exception:
+            nums = set()
+        c["dependencies"] = sorted({n for n in nums if n != c["num"]})
     return claims
 
 
@@ -186,7 +222,12 @@ def chunk_for_rag(
 
     # Add IDs and token estimates
     def _detect_lang(sample: str) -> str:
-        return "ko" if re.search(r"[가-힣]", sample) else "en"
+        if re.search(r"[가-힣]", sample):
+            return "ko"
+        # Japanese: Hiragana, Katakana, Kanji
+        if re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", sample):
+            return "ja"
+        return "en"
 
     def _weight_for_section(section_type: str) -> float:
         if section_type == "CLAIMS":
@@ -200,24 +241,30 @@ def chunk_for_rag(
     def _extract_norm_numbers(text: str) -> Tuple[List[Dict[str, Any]], List[str]]:
         nums: List[Dict[str, Any]] = []
         units_found: List[str] = []
-        # wt% or %
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(wt%|%)", text, flags=re.I):
+        t = _normalize_fullwidth_punct(text)
+        # wt% or % (include fullwidth % ％ and Japanese qualifiers)
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(wt%|%|％|質量%|質量％|重量%|重量％|原子%)", t, flags=re.I):
             val = float(m.group(1))
-            unit = m.group(2).lower()
+            unit_raw = m.group(2)
+            unit = "%" if unit_raw in ("%", "％", "質量%", "質量％", "重量%", "重量％", "原子%") else unit_raw.lower()
             nums.append({"name": "percent", "value": val, "unit": unit})
             units_found.append(unit)
-        # temperature °C (require degree symbol to avoid C22C false positives)
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*°\s*C(?:\.|\b)", text, flags=re.I):
+        # temperature °C or ℃ (require degree-like symbol to avoid C22C false positives)
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:°\s*C|℃)(?:\.|\b)", t, flags=re.I):
             nums.append({"name": "temperature", "value": float(m.group(1)), "unit": "°C"})
             units_found.append("°C")
-        # cooling rate °C/s (require degree symbol)
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*°\s*C\s*/\s*(?:s|sec)\b", text, flags=re.I):
+        # cooling rate °C/s or ℃/s
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:°\s*C|℃)\s*/\s*(?:s|sec)\b", t, flags=re.I):
             nums.append({"name": "cooling_rate", "value": float(m.group(1)), "unit": "°C/s"})
             units_found.append("°C/s")
         # core loss W/kg
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*W/kg\b", text, flags=re.I):
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*W/kg\b", t, flags=re.I):
             nums.append({"name": "core_loss", "value": float(m.group(1)), "unit": "W/kg"})
             units_found.append("W/kg")
+        # micrometers μm/um
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:μm|um)\b", t, flags=re.I):
+            nums.append({"name": "length", "value": float(m.group(1)), "unit": "μm"})
+            units_found.append("μm")
         return nums, list(sorted(set(units_found)))
 
     def _extract_parameters(text: str) -> List[str]:
@@ -228,6 +275,8 @@ def chunk_for_rag(
         # process / microstructure keywords
         keywords = [
             "cooling_rate", "cube_texture", "<100>", "EBSD", "grain", "anneal", "hot rolling",
+            # Japanese domain terms
+            "焼鈍", "冷間圧延", "熱間圧延", "冷却速度", "結晶", "介在物", "立方体集合",
         ]
         for kw in keywords:
             if kw.lower() in text.lower():
@@ -238,11 +287,11 @@ def chunk_for_rag(
         low = text.lower()
         if section_type == "CLAIMS":
             return "CONFIG"
-        if any(w in low for w in ["effect", "property", "loss", "magnetic", "elongation"]):
+        if any(w in low for w in ["effect", "property", "loss", "magnetic", "elongation", "効果", "特性", "磁気", "損失"]):
             return "EFFECT"
-        if any(w in low for w in ["rolling", "anneal", "heat treatment", "cooling", "process"]):
+        if any(w in low for w in ["rolling", "anneal", "heat treatment", "cooling", "process", "圧延", "焼鈍", "熱処理", "冷却"]):
             return "PROCESS"
-        if any(w in low for w in ["measured", "ebsd", "sem", "eds", "xrd", "cube texture"]):
+        if any(w in low for w in ["measured", "ebsd", "sem", "eds", "xrd", "cube texture", "測定", "分析"]):
             return "MEASUREMENT"
         return "CONFIG"
 
@@ -265,7 +314,8 @@ def chunk_for_rag(
 
 def _normalize_for_match(s: str) -> List[str]:
     s2 = re.sub(r"\s+", " ", s.lower())
-    s2 = re.sub(r"[^0-9a-zA-Z가-힣·\.\-_%\s]", "", s2)
+    # include Japanese Hiragana/Katakana/Kanji to keep tokens for page matching
+    s2 = re.sub(r"[^0-9a-zA-Z가-힣\u3040-\u30ff\u4e00-\u9fff·\.\-_%\s]", "", s2)
     return [t for t in s2.split() if len(t) >= 2]
 
 
@@ -325,6 +375,96 @@ META_PATTERNS = {
     "cpc_codes": r"\bCPC\b[:\s]*([A-Z0-9/;\s,]+)",
 }
 
+
+def _normalize_jp_date(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    s = raw.strip()
+    # Gregorian forms: YYYY年MM月DD日 or YYYY/MM/DD or YYYY.M.D
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    m = re.search(r"(\d{4})[\./-](\d{1,2})[\./-](\d{1,2})", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    # Reiwa era: 令和N年M月D日 (Reiwa 1 = 2019)
+    m = re.search(r"令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", s)
+    if m:
+        r, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        y = 2018 + r  # R1 -> 2019
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    return None
+
+
+def _extract_jp_metadata(text: str) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    if "日本国特許庁" in text or re.search(r"\bJP\s*\d", text):
+        meta["jurisdiction"] = "JP"
+
+    # Publication/Patent numbers
+    # Pattern A: JP 7415134 B2 → JP7415134B2
+    m = re.search(r"\bJP\s*(\d{4,9})\s*([AB]\d)\b", text)
+    if m:
+        meta["publication_number"] = f"JP{m.group(1)}{m.group(2)}".replace(" ", "")
+    # Pattern B: 特開2021-80494A / 特表YYYY-xxxxxx
+    if "publication_number" not in meta:
+        m = re.search(r"特(?:開|表)\s*(\d{4})[-－](\d{5,7})\s*([A-Z]\d)?", text)
+        if m:
+            suffix = m.group(3) or "A1"
+            meta["publication_number"] = f"JP{m.group(1)}-{m.group(2)}{suffix}"
+    # Pattern C: (11) 特許番号/公開番号
+    if "publication_number" not in meta:
+        m = re.search(r"\(11\)\s*(?:特許番号|公開番号)\s*([^)\n]+)", text)
+        if m:
+            meta["publication_number"] = re.sub(r"\s+", "", m.group(1))
+
+    # Application number
+    m = re.search(r"\(21\)\s*出願番号\s*([^\n]+)", text)
+    if m:
+        meta["application_number"] = m.group(1).strip()
+    else:
+        m = re.search(r"特願\s*([0-9]{4}[-－]\d{5,7})", text)
+        if m:
+            meta["application_number"] = m.group(1).replace("－", "-")
+
+    # Dates
+    m = re.search(r"\(22\)\s*出願日\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_jp_date(m.group(1))
+        if iso:
+            meta["application_date"] = iso
+    m = re.search(r"\((?:43|45)\)\s*(?:公開日|発行日)\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_jp_date(m.group(1))
+        if iso:
+            meta["publication_date"] = iso
+
+    # Title
+    m = re.search(r"\(54\)\s*発明の名称\s*([^\n]+)", text)
+    if m:
+        meta["title"] = m.group(1).strip()
+
+    # Assignee / Applicant and Inventors
+    m = re.search(r"\(71\)\s*出願人\s*([^\n]+)", text)
+    if m:
+        meta["assignee"] = m.group(1).strip()
+    m = re.search(r"\(72\)\s*発明者\s*([^\n]+)", text)
+    if m:
+        invent_raw = m.group(1).strip()
+        parts = re.split(r"[,、，]|\s{2,}", invent_raw)
+        meta["inventors"] = [p.strip() for p in parts if p.strip()]
+
+    # IPC codes from (51)
+    m = re.search(r"\(51\)[\s\S]{0,600}", text)
+    if m:
+        blk = m.group(0)
+        codes = _CODE_RE.findall(blk)
+        if codes:
+            meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+
+    return meta
 
 def _normalize_kr_date(raw: str) -> Optional[str]:
     if not raw:
@@ -478,14 +618,17 @@ def _extract_us_metadata(text: str) -> Dict[str, Any]:
 
 
 def extract_basic_metadata(text: str) -> Dict[str, Any]:
-    # Jurisdiction-aware extraction: KR and US, then generic English fallback
+    # Jurisdiction-aware extraction: KR, US, JP, then generic fallback
     kr_meta = _extract_kr_metadata(text)
     us_meta = _extract_us_metadata(text)
+    jp_meta = _extract_jp_metadata(text)
 
     meta: Dict[str, Any] = {}
     meta.update(kr_meta)
-    # Merge US fields only if not already present or empty
     for k, v in us_meta.items():
+        if k not in meta or meta.get(k) in (None, "", [], {}):
+            meta[k] = v
+    for k, v in jp_meta.items():
         if k not in meta or meta.get(k) in (None, "", [], {}):
             meta[k] = v
 
@@ -572,7 +715,7 @@ def convert_pdf_bytes_to_patent_json(
             for img in images:
                 # Use English + Korean if available; pytesseract falls back if not installed
                 try:
-                    ocr_txt = pytesseract.image_to_string(img, lang="eng+kor")
+                    ocr_txt = pytesseract.image_to_string(img, lang="eng+kor+jpn")
                 except Exception:
                     ocr_txt = pytesseract.image_to_string(img)
                 ocr_texts.append(ocr_txt or "")
