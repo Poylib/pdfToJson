@@ -36,11 +36,13 @@ SECTION_HEADERS: List[Tuple[str, str]] = [
     # JP: 発明の詳細な説明 / 実施形態 / 実施例
     ("DESCRIPTION", r"\b(description|detailed\s+description|specification)\b|설명서|상세한 설명|発明の詳細な説明|実施形態|実施例|说\s*明\s*书|说明书"),
     # JP: 技術分野 / 背景技術
-    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention)\b|배경|技術分野|背景技術|技\s*术\s*领\s*域|背\s*景\s*技\s*术|技术领域|背景技术"),
+    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention|background\s+art|technical\s+field)\b|배경|技術分野|背景技術|技\s*术\s*领\s*域|背\s*景\s*技\s*术|技术领域|背景技术"),
     # JP: 課題 / 解決手段 / 効果 → 요약적 성격인 섹션도 포함
-    ("SUMMARY", r"\bsummary\b|요약(서)?|課題(を解決するための手段)?|発明の効果|发\s*明\s*内\s*容|效果|发明内容"),
+    ("SUMMARY", r"\bsummary\b|요약(서)?|課題(を解決するための手段)?|発明の効果|发\s*明\s*内\s*容|效果|发明内容|summary\s+of\s+invention|solution\s+to\s+problem|effects\s+of\s+invention"),
     # JP: 図面の簡単な説明
     ("DRAWINGS", r"\bbrief\s+description\s+of\s+the\s+drawings\b|도면의 간단한 설명|図面の簡単な説明|附\s*图\s*说\s*明|说明书附图|附图说明"),
+    # EP: Industrial Applicability
+    ("SUMMARY", r"\bindustrial\s+applicability\b"),
 ]
 
 
@@ -704,12 +706,71 @@ def _extract_us_metadata(text: str) -> Dict[str, Any]:
     return meta
 
 
+def _normalize_ep_number(num: str) -> str:
+    # EP 4 296 380 A1 -> EP4296380A1
+    s = re.sub(r"\s+", "", num)
+    s = s.replace("EP", "EP")
+    return s
+
+
+def _extract_ep_metadata(text: str) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    if re.search(r"\bEUROPEAN\s+PATENT\s+APPLICATION\b", text, flags=re.I) or re.search(r"\bEP\s*\d", text):
+        meta["jurisdiction"] = "EP"
+
+    # Publication number EP 4 296 380 A1
+    m = re.search(r"\bEP\s*([0-9][0-9\s]{5,})\s*([AB][0-9])\b", text)
+    if m:
+        raw = f"EP{m.group(1)}{m.group(2)}"
+        meta["publication_number"] = _normalize_ep_number(raw)
+
+    # Application number
+    m = re.search(r"\(21\)\s*Application\s*number\s*[:\-]?\s*([0-9/\.]+)", text, flags=re.I)
+    if m:
+        meta["application_number"] = m.group(1).strip()
+
+    # Dates
+    m = re.search(r"\(43\)\s*Date\s+of\s+publication\s*[:\-]?\s*([0-9\.]+)", text, flags=re.I)
+    if m:
+        meta["publication_date"] = re.sub(r"(\d{2})\.(\d{2})\.(\d{4})", r"\3-\2-\1", m.group(1))
+    m = re.search(r"\(22\)\s*Date\s+of\s+filing\s*[:\-]?\s*([0-9\.]+)", text, flags=re.I)
+    if m:
+        meta["application_date"] = re.sub(r"(\d{2})\.(\d{2})\.(\d{4})", r"\3-\2-\1", m.group(1))
+
+    # Title
+    m = re.search(r"\(54\)\s*([A-Z].+)", text)
+    if m:
+        meta["title"] = m.group(1).strip()
+
+    # Applicant / Inventors
+    m = re.search(r"\(71\)\s*Applicant\s*:?\s*([^\n]+)", text, flags=re.I)
+    if m:
+        meta["assignee"] = m.group(1).strip()
+    inv = re.search(r"\(72\)\s*Inventors?\s*:?\s*([\s\S]{0,200})", text, flags=re.I)
+    if inv:
+        line = inv.group(1).split("\n")[0]
+        parts = re.split(r"[,;]", line)
+        meta["inventors"] = [p.strip() for p in parts if p.strip()]
+
+    # IPC (51) and CPC (52)
+    blk = re.search(r"\(51\)[\s\S]{0,600}", text)
+    codes = _CODE_RE.findall(blk.group(0)) if blk else []
+    if codes:
+        meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+    blk = re.search(r"\(52\)[\s\S]{0,600}", text)
+    codes = _CODE_RE.findall(blk.group(0)) if blk else []
+    if codes:
+        meta["cpc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+
+    return meta
+
 def extract_basic_metadata(text: str) -> Dict[str, Any]:
-    # Jurisdiction-aware extraction: KR, US, JP, CN, then generic fallback
+    # Jurisdiction-aware extraction: KR, US, JP, CN, EP, then generic fallback
     kr_meta = _extract_kr_metadata(text)
     us_meta = _extract_us_metadata(text)
     jp_meta = _extract_jp_metadata(text)
     cn_meta = _extract_cn_metadata(text)
+    ep_meta = _extract_ep_metadata(text)
 
     meta: Dict[str, Any] = {}
     meta.update(kr_meta)
@@ -720,6 +781,9 @@ def extract_basic_metadata(text: str) -> Dict[str, Any]:
         if k not in meta or meta.get(k) in (None, "", [], {}):
             meta[k] = v
     for k, v in cn_meta.items():
+        if k not in meta or meta.get(k) in (None, "", [], {}):
+            meta[k] = v
+    for k, v in ep_meta.items():
         if k not in meta or meta.get(k) in (None, "", [], {}):
             meta[k] = v
 
@@ -806,7 +870,7 @@ def convert_pdf_bytes_to_patent_json(
             for img in images:
                 # Use English + Korean if available; pytesseract falls back if not installed
                 try:
-                    ocr_txt = pytesseract.image_to_string(img, lang="eng+kor+jpn+chi_sim")
+                    ocr_txt = pytesseract.image_to_string(img, lang="eng+kor+jpn+chi_sim+deu+fra")
                 except Exception:
                     ocr_txt = pytesseract.image_to_string(img)
                 ocr_texts.append(ocr_txt or "")
