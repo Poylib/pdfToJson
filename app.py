@@ -3,15 +3,13 @@ import json
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
-import pdfplumber
 
 # 특허 전처리 모듈 및 zip 생성
 from patent_processing import (
     chunks_to_jsonl,
 )
 import zipfile
-import hashlib
-from patent_processing import clean_text, split_sections, extract_claims, chunk_for_rag, extract_basic_metadata
+from patent_processing import convert_pdf_bytes_to_patent_json
 
 
 # 불필요해진 일반 변환 관련 함수/코드를 제거했습니다.
@@ -32,62 +30,33 @@ def _ui_patent_converter() -> None:
 
     file_bytes = uploaded_file.getvalue()
 
-    # 진행 상황 표시: 페이지 추출 → 전처리/섹션 → 청크화
     status = st.empty()
     progress = st.progress(0)
     try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            total_pages = len(pdf.pages)
-            texts: List[str] = []
-            for idx, page in enumerate(pdf.pages, start=1):
-                status.write(f"페이지 {idx}/{total_pages} 텍스트 추출 중…")
-                page_text = page.extract_text() or ""
-                texts.append(page_text)
-                progress.progress(min(70, int(idx / total_pages * 70)))
-
-        status.write("전처리 및 섹션 분리 중…")
-        cleaned = clean_text("\n".join(texts))
-        sections = split_sections(cleaned)
-        progress.progress(80)
-
-        status.write("청구항 분석 및 청크화 중…")
-        claims_text = ""
-        for s in sections:
-            if s.get("type") == "CLAIMS":
-                claims_text = s.get("text", "")
-                break
-        claims = extract_claims(claims_text) if claims_text else []
-        progress.progress(85)
-        # 1) 청구항 기반 청크
-        claim_chunks = chunk_for_rag([], claims, target_tokens=600, overlap_tokens=80)
-        progress.progress(90)
-        # 2) 섹션 기반 청크
-        section_chunks = chunk_for_rag(sections, [], target_tokens=600, overlap_tokens=80)
-        chunks = claim_chunks + section_chunks
-        progress.progress(95)
-
-        meta = extract_basic_metadata(cleaned)
-        # 문서 JSON 구성
-        doc_id = hashlib.md5((uploaded_file.name + str(len(cleaned))).encode("utf-8")).hexdigest()
-        document = {
-            "doc_id": doc_id,
-            "file_name": uploaded_file.name,
-            "num_sections": len(sections),
-            "num_claims": len(claims),
-            "metadata": meta,
-            "sections": sections,
-            "claims": claims,
-        }
-        for ch in chunks:
-            ch["doc_id"] = doc_id
-
+        status.write("PDF 처리 및 JSON 생성 중…")
+        document, chunks = convert_pdf_bytes_to_patent_json(file_bytes, file_name=uploaded_file.name)
         progress.progress(100)
         status.write("완료")
     except Exception as err:
         st.error(f"특허 변환 중 문제가 발생했습니다: {err}")
         return
 
-    st.success(f"특허 변환 완료: 섹션 {document['num_sections']}개, 청구항 {document['num_claims']}개, 청크 {len(chunks)}개")
+    # Count using new schema with backward compatibility
+    try:
+        sec_count = len(document.get("structure", {}).get("sections_index", []))
+        if sec_count == 0:
+            sec_count = len(document.get("sections", []))
+    except Exception:
+        sec_count = len(document.get("sections", []))
+
+    try:
+        claim_count = document.get("structure", {}).get("claims_count")
+        if claim_count is None:
+            claim_count = len(document.get("claims", []))
+    except Exception:
+        claim_count = len(document.get("claims", []))
+
+    st.success(f"특허 변환 완료: 섹션 {sec_count}개, 청구항 {claim_count}개, 청크 {len(chunks)}개")
 
     indent_value: Optional[int] = 2 if pretty_print else None
     doc_json_str = json.dumps(document, ensure_ascii=ensure_ascii, indent=indent_value)
@@ -142,29 +111,8 @@ def _ui_bulk_converter() -> None:
             for idx, uf in enumerate(uploaded_files):
                 status.write(f"처리 중: {uf.name} ({idx+1}/{len(uploaded_files)})")
                 try:
-                    # 문서 변환 (전체 페이지)
-                    with pdfplumber.open(io.BytesIO(uf.getvalue())) as pdf:
-                        texts: List[str] = [p.extract_text() or "" for p in pdf.pages]
-                    cleaned = clean_text("\n".join(texts))
-                    sections = split_sections(cleaned)
-                    claims_text = next((s.get("text", "") for s in sections if s.get("type") == "CLAIMS"), "")
-                    claims = extract_claims(claims_text) if claims_text else []
-                    claim_chunks = chunk_for_rag([], claims, target_tokens=600, overlap_tokens=80)
-                    section_chunks = chunk_for_rag(sections, [], target_tokens=600, overlap_tokens=80)
-                    chunks = claim_chunks + section_chunks
-                    meta = extract_basic_metadata(cleaned)
-                    doc_id = hashlib.md5((uf.name + str(len(cleaned))).encode("utf-8")).hexdigest()
-                    doc = {
-                        "doc_id": doc_id,
-                        "file_name": uf.name,
-                        "num_sections": len(sections),
-                        "num_claims": len(claims),
-                        "metadata": meta,
-                        "sections": sections,
-                        "claims": claims,
-                    }
-                    for ch in chunks:
-                        ch["doc_id"] = doc_id
+                    # 문서 변환 (공용 변환기 사용)
+                    doc, chunks = convert_pdf_bytes_to_patent_json(uf.getvalue(), file_name=uf.name)
                 except Exception as err:
                     error_msg = json.dumps({"file": uf.name, "error": str(err)}, ensure_ascii=False)
                     zf.writestr(f"errors/{uf.name}.error.json", error_msg)
