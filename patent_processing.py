@@ -30,19 +30,20 @@ def clean_text(text: str) -> str:
 
 
 SECTION_HEADERS: List[Tuple[str, str]] = [
-    ("ABSTRACT", r"\babstract\b|요약|要約|摘\s*要"),
-    # JP: 特許請求の範囲 / 請求項
-    ("CLAIMS", r"\bclaims?\b|\bwhat\s+is\s+claimed\b|청구항|청구범위|特許請求の範囲|請求項|权\s*利\s*要\s*求(?:\s*书)?|权利要求书|权利要求"),
-    # JP: 発明の詳細な説明 / 実施形態 / 実施例
-    ("DESCRIPTION", r"\b(description|detailed\s+description|specification)\b|설명서|상세한 설명|발명의 설명|발명을 실시하기 위한 구체적인 내용|発明の詳細な説明|実施形態|実施例|说\s*明\s*书|说明书"),
-    # JP: 技術分野 / 背景技術
-    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention|background\s+art|technical\s+field)\b|배경|기술분야|배경기술|技\s*术\s*领\s*域|背\s*景\s*技\s*术|技术领域|背景技术"),
-    # JP: 課題 / 解決手段 / 効果 → 요약적 성격인 섹션도 포함
-    ("SUMMARY", r"\bsummary\b|요약(서)?|발명의 내용|과제의 해결 수단|발명의 효과|課題(を解決するための手段)?|発明の効果|发\s*明\s*内\s*容|效果|发明内容|summary\s+of\s+invention|solution\s+to\s+problem|effects\s+of\s+invention"),
-    # JP: 図面の簡単な説明
-    ("DRAWINGS", r"\bbrief\s+description\s+of\s+the\s+drawings\b|도면의 간단한 설명|図面の簡単な説明|附\s*图\s*说\s*明|说明书附图|附图说明"),
-    # EP: Industrial Applicability
-    ("SUMMARY", r"\bindustrial\s+applicability\b"),
+    # Abstract
+    ("ABSTRACT", r"\babstract\b|요약|要約|摘\s*要|zusammenfassung|résumé"),
+    # Claims / Revendications / Ansprüche
+    ("CLAIMS", r"\bclaims?\b|\bwhat\s+is\s+claimed\b|청구항|청구범위|特許請求の範囲|請求項|权\s*利\s*要\s*求(?:\s*书)?|权利要求书|权利要求|ansprüche?|revendications?"),
+    # Description / Beschreibung
+    ("DESCRIPTION", r"\b(description|detailed\s+description|specification)\b|설명서|상세한 설명|발명의 설명|발명을 실시하기 위한 구체적인 내용|発明の詳細な説明|実施形態|実施例|说\s*明\s*书|说明书|beschreibung"),
+    # Background / Technical field / Stand der Technik
+    ("BACKGROUND", r"\b(background|field\s+of\s+the\s+invention|background\s+art|technical\s+field)\b|배경|기술분야|배경기술|技\s*术\s*领\s*域|背\s*景\s*技\s*术|技术领域|背景技术|stand\s+der\s+technik|technisches\s+gebiet|état\s+de\s+la\s+technique|domaine\s+technique"),
+    # Summary / Effects
+    ("SUMMARY", r"\bsummary\b|요약(서)?|발명의 내용|과제의 해결 수단|발명의 효과|課題(を解決するための手段)?|発明の効果|发\s*明\s*内\s*容|效果|发明内容|summary\s+of\s+invention|solution\s+to\s+problem|effects\s+of\s+invention|zusammenfassung\s+der\s+erfindung"),
+    # Brief description of drawings
+    ("DRAWINGS", r"\bbrief\s+description\s+of\s+the\s+drawings\b|도면의 간단한 설명|図面の簡単な説明|附\s*图\s*说\s*明|说明书附图|附图说明|kurze\s+beschreibung\s+der\s+zeichnungen|brève\s+description\s+des\s+dessins"),
+    # Industrial Applicability
+    ("SUMMARY", r"\bindustrial\s+applicability\b|industrielle\s+anwendbarkeit|application\s+industrielle"),
 ]
 
 
@@ -89,6 +90,10 @@ KO_CLAIM_LINE_IMPROVED = re.compile(r"^\s*청구항\s*(\d+)\s*[\.）)]?\s*")
 KO_CLAIM_LINE_WITH_DOT = re.compile(r"^\s*청구항\s*(\d+)\s*[\..]\s*")
 KO_CLAIM_LINE_WITH_PAREN = re.compile(r"^\s*청구항\s*(\d+)\s*[）)]\s*")
 
+# DE/FR claims line patterns
+DE_CLAIM_LINE = re.compile(r"^\s*(?:anspruch|ansprüche)\s*([0-9０-９]+)\s*[\.．）)]?\s*", re.I)
+FR_CLAIM_LINE = re.compile(r"^\s*revendications?\s*([0-9０-９]+)\s*[\.．）)]?\s*", re.I)
+
 def _normalize_fullwidth_digits(s: str) -> str:
     # Convert fullwidth digits to ASCII
     return s.translate(str.maketrans({
@@ -120,7 +125,9 @@ def extract_claims(claims_text: str) -> List[Dict[str, Any]]:
              CLAIM_LINE.match(ln) or
              KO_CLAIM_LINE.match(ln) or
              JA_CLAIM_LINE.match(ln) or
-             CN_CLAIM_LINE.match(ln))
+             CN_CLAIM_LINE.match(ln) or
+             DE_CLAIM_LINE.match(ln) or
+             FR_CLAIM_LINE.match(ln))
 
         if m:
             if cur:
@@ -249,6 +256,12 @@ def chunk_for_rag(
         # CJK Han without kana ⇒ treat as Chinese by default
         if re.search(r"[\u4e00-\u9fff]", sample):
             return "zh"
+        # German hints
+        if re.search(r"[äöüÄÖÜß]|\b(anspruch|ansprüche|zusammenfassung|beschreibung)\b", sample, flags=re.I):
+            return "de"
+        # French hints
+        if re.search(r"[éèàùçÉÈÀÙÇ]|\b(revendication|revendications|résumé|description)\b", sample, flags=re.I):
+            return "fr"
         return "en"
 
     def _weight_for_section(section_type: str) -> float:
@@ -413,8 +426,7 @@ META_PATTERNS = {
     "publication_number": r"\b(PUB\s*NO\.?|publication\s*number)[:\s]*([A-Z]{2}\d+[A-Z]?\d*)",
     "application_number": r"\b(application\s*number|app\s*no\.?|appl\.?\s*no\.?)[:\s]*([A-Z]{2}\d+[A-Z]?\d*)",
     "registration_number": r"\b(registration\s*number|patent\s*number|등록번호|特許番号|专利号)[:\s]*([A-Z0-9\-\s]+)",
-    "ipc_codes": r"\bIPC\b[:\s]*([A-Z0-9/;\s,]+)",
-    "cpc_codes": r"\bCPC\b[:\s]*([A-Z0-9/;\s,]+)",
+    # Note: IPC/CPC의 fallback은 노이즈가 많아 비활성화 (전용 추출만 사용)
 }
 
 
@@ -550,12 +562,59 @@ _CODE_RE = re.compile(r"\b[A-H][0-9]{2}[A-Z]\s?[0-9]+/[0-9]+\b")
 
 def _extract_kr_metadata(text: str) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
-    if "대한민국특허청" in text or "(KR)" in text:
+    # KR 관할 인식: 한국어 라벨 기반으로만 판단 (지정국 (KR)로 인한 오검출 방지)
+    if ("대한민국특허청" in text) or re.search(r"(?:\(11\)\s*공개번호|\(43\)\s*공개일자|\(21\)\s*출원번호|공개특허|등록특허)", text):
         meta["jurisdiction"] = "KR"
+
+    # ---- 번호 태그 기반 우선 추출 ----
+    # (11) 공개번호 / 등록번호
+    m = re.search(r"\(11\)\s*공개번호\s*([0-9]{2,4}-\d{5,})", text)
+    if m:
+        meta["publication_number"] = m.group(1)
+    if "registration_number" not in meta:
+        m = re.search(r"\(11\)\s*등록번호\s*([0-9]{2,4}-\d{5,})", text)
+        if m:
+            meta["registration_number"] = m.group(1)
+
+    # (43) 공개일자
+    m = re.search(r"\(43\)\s*공개일자\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_kr_date(m.group(1))
+        if iso:
+            meta["publication_date"] = iso
+
+    # (21) 출원번호
+    m = re.search(r"\(21\)\s*출원번호\s*([0-9]{2,4}-\d{5,})", text)
+    if m:
+        meta["application_number"] = m.group(1)
+
+    # (22) 출원일자
+    m = re.search(r"\(22\)\s*출원일자\s*([^\n]+)", text)
+    if m:
+        iso = _normalize_kr_date(m.group(1))
+        if iso:
+            meta["application_date"] = iso
+
+    # (54) 발명의 명칭
+    m = re.search(r"\(54\)\s*발명의\s*명칭\s*([^\n]+)", text)
+    if m:
+        meta["title"] = m.group(1).strip()
+
+    # (51) IPC, (52) CPC
+    m = re.search(r"\(51\)[\s\S]{0,600}", text)
+    if m:
+        codes = _CODE_RE.findall(m.group(0))
+        if codes:
+            meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+    m = re.search(r"\(52\)[\s\S]{0,600}", text)
+    if m:
+        codes = _CODE_RE.findall(m.group(0))
+        if codes:
+            meta["cpc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
 
     # 공개번호 추출 - 두 하이픈(예: 10-2025-0010543) 및 단일 하이픈 형식 모두 허용
     m = re.search(r"\(11\)\s*공개번호\s*((?:\d{2}-\d{4}-\d{5,7})|(?:\d{2,4}-\d{5,7}))", text)
-    if m:
+    if m and "publication_number" not in meta:
         meta["publication_number"] = m.group(1)
     # 폴백: 상단 머리말 '공개특허 10-YYYY-xxxxxx' 패턴 지원
     if "publication_number" not in meta:
@@ -607,22 +666,32 @@ def _extract_kr_metadata(text: str) -> Dict[str, Any]:
         if iso:
             meta["registration_date"] = iso
 
-    # 발명의 명칭 추출
-    m = re.search(r"\(54\)\s*발명의\s*명칭\s*([^\n]+)", text)
-    if m:
-        meta["title"] = m.group(1).strip()
+    # 출원인/발명자 정제: 라벨 제거 및 타이틀 단어 배제
+    invalid_tokens = {"출원인", "발명자", "대리인"}
 
     # 출원인 추출 - IPC 코드와 분리하여 추출
-    m = re.search(r"\(71\)\s*출원인\s*([^\n]+)", text)
+    m = re.search(r"\(71\)\s*출원인\s*([\s\S]*?)(?=\(7\d\)\s|\(8\d\)\s|$)", text)
     if m:
-        assignee_text = m.group(1).strip()
-        # IPC 코드 패턴 제거
-        assignee_clean = re.sub(r"\b[A-H][0-9]{2}[A-Z]\s?[0-9]+/[0-9]+\s*\([0-9]{4}\.[0-9]{2}\)\s*", "", assignee_text)
-        # 주소 정보 제거 (괄호 안의 내용)
+        block = m.group(1)
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        def _looks_like_address(ln: str) -> bool:
+            return bool(re.search(r"(대한민국|한국|일본|일본국|중국|미국|도|시|군|구|읍|면|동|리|로|길|대로|번지|호|층|우편|우\s*편)", ln))
+        assignee_line = ""
+        for ln in lines:
+            if re.fullmatch(r"(?:출원인|발명자|대리인)", ln):
+                continue
+            if _looks_like_address(ln):
+                continue
+            assignee_line = ln
+            break
+        if not assignee_line and lines:
+            assignee_line = lines[0]
+        assignee_line = assignee_line or ""
+        # IPC 코드 패턴 제거 및 괄호 제거
+        assignee_clean = re.sub(r"\b[A-H][0-9]{2}[A-Z]\s?[0-9]+/[0-9]+\s*\([0-9]{4}\.[0-9]{2}\)\s*", "", assignee_line)
         assignee_clean = re.sub(r"\s*\([^)]+\)\s*", "", assignee_clean)
-        # 연속된 공백 정리
         assignee_clean = re.sub(r"\s+", " ", assignee_clean).strip()
-        if assignee_clean:
+        if assignee_clean and assignee_clean not in invalid_tokens and assignee_clean not in ("출원인", "발명자", "대리인"):
             meta["assignee"] = assignee_clean
 
     # 발명자 추출 - 우측 컬럼 내 다음 (7x) 필드 직전까지 캡처 (좌측 컬럼 (5x)(2x) 등은 무시)
@@ -643,7 +712,13 @@ def _extract_kr_metadata(text: str) -> Dict[str, Any]:
                 continue
             if re.search(r"^(대리인|특허법인)", line):
                 continue
-            if re.search(r"[가-힣]{2,4}", line) and 1 <= len(line) <= 10:
+            if line in ("출원인", "발명자", "대리인"):
+                continue
+            if re.search(r"(대한민국|한국|일본|일본국|중국|미국)", line):
+                continue
+            if line in invalid_tokens:
+                continue
+            if re.search(r"[가-힣]{2,4}", line) and 1 <= len(line) <= 20:
                 inventors_set.add(line)
 
         # 방법 B) 토큰 기반: '이름 +(주소)' 패턴에서 이름 캡처
@@ -931,8 +1006,203 @@ def _extract_ep_metadata(text: str) -> Dict[str, Any]:
 
     return meta
 
+def _normalize_wo_pub(num: str) -> str:
+    # "WO 2024/094410 A1" -> "WO2024/094410A1"
+    s = re.sub(r"\s+", "", num)
+    s = s.replace("WO", "WO")
+    return s
+
+def _extract_wo_pub_from_text(text: str) -> Optional[str]:
+    # Normalize unusual spaces and fullwidth slash so regex can match robustly
+    s = (text or "").replace("／", "/")
+    # Pattern A: WO 2024/094410 A1 (allow NBSP/thin-space and line breaks between tokens)
+    m = re.search(
+        r"WO[\s\u00A0\u202F\u2007\u2060]*([0-9０-９]{4})[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*((?:[0-9０-９][\s\u00A0\u202F\u2007\u2060]*){3,})[\s\u00A0\u202F\u2007\u2060]*([AＡ])[\s\u00A0\u202F\u2007\u2060]*([1１])",
+        s,
+        flags=re.I,
+    )
+    if m:
+        year = _normalize_fullwidth_digits(m.group(1))
+        serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(2)))
+        return f"WO{year}/{serial}A1"
+
+    # Pattern B: compact or already-tight form like "WO2024/172115A1"
+    m = re.search(r"WO[\s\u00A0\u202F\u2007\u2060]*[0-9０-９]{4}[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*[0-9０-９]{3,}[\s\u00A0\u202F\u2007\u2060]*A[\s\u00A0\u202F\u2007\u2060]*1",
+                    s, flags=re.I)
+    if m:
+        raw = _normalize_fullwidth_digits(m.group(0))
+        raw = re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", raw)
+        return raw.replace("WO", "WO")
+    return None
+
+def _parse_date_wo(s: str) -> Optional[str]:
+    s = s.strip()
+    # Numeric like 10.05.2024
+    m = re.search(r"(\d{1,2})[.\-/\s](\d{1,2})[.\-/\s](\d{4})", s)
+    if m:
+        d, mo, y = m.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    # Month name (EN/DE/FR minimal coverage)
+    months = {
+        "january":"01","february":"02","march":"03","april":"04","may":"05","june":"06",
+        "july":"07","august":"08","september":"09","october":"10","november":"11","december":"12",
+        "januar":"01","februar":"02","märz":"03","maerz":"03","april":"04","mai":"05","juni":"06","juli":"07",
+        "august":"08","september":"09","oktober":"10","november":"11","dezember":"12",
+        "janvier":"01","février":"02","fevrier":"02","mars":"03","avril":"04","mai":"05","juin":"06",
+        "juillet":"07","août":"08","aout":"08","septembre":"09","octobre":"10","novembre":"11","décembre":"12","decembre":"12",
+    }
+    m = re.search(r"(\d{1,2})\s+([A-Za-zäöüÄÖÜßéèàùç]+)\s+(\d{4})", s)
+    if m:
+        d, mon, y = m.groups()
+        mon2 = (mon.lower()
+            .replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
+            .replace("é","e").replace("è","e").replace("à","a").replace("ù","u").replace("ç","c"))
+        for k,v in months.items():
+            k2 = (k.lower()
+                .replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
+                .replace("é","e").replace("è","e").replace("à","a").replace("ù","u").replace("ç","c"))
+            if mon2 == k2:
+                return f"{int(y):04d}-{v}-{int(d):02d}"
+    return None
+
+def _extract_wo_metadata(text: str) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    if re.search(r"\bWIPO\b|\bPCT\b|\bWO\s*\d{4}/\d{3,}", text) or re.search(r"\(10\)\s*", text):
+        meta["jurisdiction"] = "WO"
+
+    # Publication number (10): 괄호 번호 기반 인식 → 라벨 언어와 무관
+    pub = None
+    m10 = re.search(r"\(10\)[\s\S]{0,180}", text)
+    if m10:
+        pub = _extract_wo_pub_from_text(m10.group(0))
+    if not pub:
+        pub = _extract_wo_pub_from_text(text)
+    if pub:
+        meta["publication_number"] = pub
+
+    # PCT application number: robust to spaces/newlines and fullwidth digits
+    s_norm = (text or "").replace("／", "/")
+    m = re.search(
+        r"\bPCT/([A-Z]{2,3})[\s\u00A0\u202F\u2007\u2060]*([0-9０-９]{4})[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*((?:[0-9０-９][\s\u00A0\u202F\u2007\u2060]*){3,})\b",
+        s_norm,
+    )
+    if m:
+        cc = m.group(1)
+        year = _normalize_fullwidth_digits(m.group(2))
+        serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(3)))
+        meta["application_number"] = f"PCT/{cc}{year}/{serial}"
+
+    # Dates (43) publication, (22) filing
+    m = re.search(r"\(43\)[^\n]{0,40}([^\n]+)", text)
+    if m:
+        d = _parse_date_wo(m.group(1))
+        if d:
+            meta["publication_date"] = d
+    m = re.search(r"\(22\)[^\n]{0,40}([^\n]+)", text)
+    if m:
+        d = _parse_date_wo(m.group(1))
+        if d:
+            meta["application_date"] = d
+
+    # Title (54): 번호 태그부터 다음 번호 태그 전까지 블록을 캡처하여 줄바꿈을 공백으로 연결
+    tblk = re.search(r"\(54\)\s*([\s\S]*?)(?=\n\(\d{2}\)\s|$)", text)
+    if tblk:
+        raw_title = tblk.group(1).strip()
+        # 첫 줄이 'Title:'로 시작하면 제거
+        raw_title = re.sub(r"^\s*Title\s*:\s*", "", raw_title, flags=re.I)
+        # 여러 줄을 공백으로 이어붙이고 이중 공백 축소
+        title = re.sub(r"\s+", " ", raw_title).strip()
+        if title:
+            meta["title"] = title
+
+    # Applicant (71), Inventors (72): 번호 태그 경계까지 캡처
+    m = re.search(r"\(71\)\s*([\s\S]*?)(?=\(7\d\)\s|\(8\d\)\s|$)", text)
+    if m:
+        block71 = m.group(1)
+        lines71 = [ln.strip() for ln in block71.splitlines() if ln.strip()]
+        candidate = ""
+        # 1) 괄호 내 영문 대문자 회사명 우선 (예: (NIPPON STEEL CORPORATION))
+        m_en = re.search(r"\(([A-Z][A-Z0-9 &\-\.,]{5,})\)", block71)
+        if m_en:
+            candidate = m_en.group(1).strip()
+        # 2) 일본어 회사명(株式会社 포함) 라인 백업
+        if not candidate:
+            for ln in lines71:
+                if "株式会社" in ln:
+                    candidate = ln
+                    break
+        # 3) 첫 줄 백업 + 주소/코드/괄호 제거
+        if not candidate and lines71:
+            candidate = lines71[0]
+        if candidate:
+            candidate = re.sub(r"\s*\([^)]+\)\s*", " ", candidate)  # remove parens content (addresses)
+            candidate = re.sub(r"\[[^\]]+\]", " ", candidate)       # remove [JP/JP] etc
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            # 라벨 제거
+            candidate = re.sub(r"^(Applicant|出願人)\s*:?\s*", "", candidate, flags=re.I)
+            if candidate:
+                meta["assignee"] = candidate
+    m = re.search(r"\(72\)\s*([\s\S]*?)(?=\(7\d\)\s|\(8\d\)\s|$)", text)
+    if m:
+        first_line = m.group(1).split("\n")[0]
+        # Prefer romanized names inside parentheses
+        roman = re.findall(r"\(([A-Za-z ,\-]+)\)", first_line)
+        inv: List[str] = []
+        for r in roman:
+            name = re.sub(r"\s+", " ", r).strip().strip(",")
+            if name:
+                inv.append(name)
+        if not inv:
+            # Fallback: split and drop country codes / treaty text
+            clean = re.sub(r"\b[A-Z]{2}\b", "", first_line)
+            clean = re.sub(r"OAPI\s*\([^)]*\)", "", clean, flags=re.I)
+            parts = re.split(r"[,、，;]\s*", clean)
+            inv = [p.strip() for p in parts if p.strip()]
+        if inv:
+            meta["inventors"] = inv
+
+    # IPC (51): 태그 블록 내에서만 수집
+    blk = re.search(r"\(51\)[\s\S]{0,600}", text)
+    codes = _CODE_RE.findall(blk.group(0)) if blk else []
+    if codes:
+        meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
+
+    # Application number (21): PCT/... 우선 인식 (allow spaces and fullwidth digits)
+    m = re.search(
+        r"\(21\)[^\n]{0,120}PCT/([A-Z]{2,3})[\s\u00A0\u202F\u2007\u2060]*([0-9０-９]{4})[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*((?:[0-9０-９][\s\u00A0\u202F\u2007\u2060]*){3,})",
+        s_norm,
+    )
+    if m:
+        cc = m.group(1)
+        year = _normalize_fullwidth_digits(m.group(2))
+        serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(3)))
+        meta["application_number"] = f"PCT/{cc}{year}/{serial}"
+    elif "application_number" not in meta:
+        m = re.search(
+            r"PCT/([A-Z]{2,3})[\s\u00A0\u202F\u2007\u2060]*([0-9０-９]{4})[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*((?:[0-9０-９][\s\u00A0\u202F\u2007\u2060]*){3,})",
+            s_norm,
+        )
+        if m:
+            cc = m.group(1)
+            year = _normalize_fullwidth_digits(m.group(2))
+            serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(3)))
+            meta["application_number"] = f"PCT/{cc}{year}/{serial}"
+
+    # Dates (22)/(43): 번호 태그 기반
+    m = re.search(r"\(22\)[^\n]{0,80}([^\n]+)", text)
+    if m:
+        d = _parse_date_wo(m.group(1))
+        if d:
+            meta["application_date"] = d
+    m = re.search(r"\(43\)[^\n]{0,80}([^\n]+)", text)
+    if m:
+        d = _parse_date_wo(m.group(1))
+        if d:
+            meta["publication_date"] = d
+    return meta
 def extract_basic_metadata(text: str) -> Dict[str, Any]:
-    # Jurisdiction-aware extraction: KR, US, JP, CN, EP, then generic fallback
+    # Jurisdiction-aware extraction: WO first, then KR/US/JP/CN/EP, then generic fallback
+    wo_meta = _extract_wo_metadata(text)
     kr_meta = _extract_kr_metadata(text)
     us_meta = _extract_us_metadata(text)
     jp_meta = _extract_jp_metadata(text)
@@ -940,7 +1210,9 @@ def extract_basic_metadata(text: str) -> Dict[str, Any]:
     ep_meta = _extract_ep_metadata(text)
 
     meta: Dict[str, Any] = {}
-    meta.update(kr_meta)
+    # WO 우선 반영
+    meta.update(wo_meta)
+    # 다른 관할 병합
     for k, v in us_meta.items():
         if k not in meta or meta.get(k) in (None, "", [], {}):
             meta[k] = v
@@ -953,6 +1225,9 @@ def extract_basic_metadata(text: str) -> Dict[str, Any]:
     for k, v in ep_meta.items():
         if k not in meta or meta.get(k) in (None, "", [], {}):
             meta[k] = v
+    for k, v in kr_meta.items():
+        if k not in meta or meta.get(k) in (None, "", [], {}):
+            meta[k] = v
 
     # Generic fallback for any remaining keys
     for k, pat in META_PATTERNS.items():
@@ -961,6 +1236,15 @@ def extract_basic_metadata(text: str) -> Dict[str, Any]:
         m = re.search(pat, text, flags=re.I)
         if m:
             meta[k] = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
+
+    # 관할 재확정: publication_number 접두 기반
+    pub = str(meta.get("publication_number", ""))
+    if   pub.startswith("WO"): meta["jurisdiction"] = "WO"
+    elif pub.startswith("EP"): meta["jurisdiction"] = "EP"
+    elif pub.startswith("US"): meta["jurisdiction"] = "US"
+    elif pub.startswith("JP"): meta["jurisdiction"] = "JP"
+    elif pub.startswith("CN"): meta["jurisdiction"] = "CN"
+    elif pub.startswith("KR"): meta["jurisdiction"] = "KR"
 
     return {k: v for k, v in meta.items() if v not in (None, "", [], {})}
 
@@ -1037,9 +1321,13 @@ def convert_pdf_bytes_to_patent_json(
             for img in images:
                 # Use English + Korean if available; pytesseract falls back if not installed
                 try:
-                    ocr_txt = pytesseract.image_to_string(img, lang="eng+kor+jpn+chi_sim+deu+fra")
+                    ocr_txt = pytesseract.image_to_string(
+                        img,
+                        lang="eng+kor+jpn+chi_sim+deu+fra",
+                        config="--psm 6",
+                    )
                 except Exception:
-                    ocr_txt = pytesseract.image_to_string(img)
+                    ocr_txt = pytesseract.image_to_string(img, config="--psm 6")
                 ocr_texts.append(ocr_txt or "")
             if sum(len(t) for t in ocr_texts) > sum(len(t) for t in texts):
                 texts = ocr_texts
