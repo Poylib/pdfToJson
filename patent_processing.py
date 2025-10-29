@@ -560,6 +560,25 @@ def _normalize_kr_date(raw: str) -> Optional[str]:
 _CODE_RE = re.compile(r"\b[A-H][0-9]{2}[A-Z]\s?[0-9]+/[0-9]+\b")
 
 
+def _normalize_code_ocr(s: str) -> str:
+    """Lightweight OCR normalization for IPC/CPC code regions.
+
+    - Replace letter 'O' with zero when between class letter and digits (e.g., HO2K -> H02K)
+    - Replace letter 'I' with one when between digits (e.g., H0IF -> H01F)
+    - Normalize exotic spaces and dashes
+    """
+    if not s:
+        return s
+    t = s
+    # H O 2K -> H 0 2K  (class letter A-H followed by O before a digit)
+    t = re.sub(r"([A-H])O(?=\d)", r"\g<1>0", t)
+    # digit I digit -> digit 1 digit
+    t = re.sub(r"(?<=\d)I(?=\d)", "1", t)
+    # common unicode dashes/spaces
+    t = t.replace("／", "/").replace("–", "-").replace("—", "-")
+    return t
+
+
 def _extract_kr_metadata(text: str) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
     # KR 관할 인식: 한국어 라벨 기반으로만 판단 (지정국 (KR)로 인한 오검출 방지)
@@ -785,9 +804,12 @@ def _extract_cn_metadata(text: str) -> Dict[str, Any]:
         meta["jurisdiction"] = "CN"
 
     # Publication numbers: CN 118835166 A / B
-    m = re.search(r"\bCN\s*(\d{7,9})\s*([AB])\b", text)
-    if m:
-        meta["publication_number"] = f"CN{m.group(1)}{m.group(2)}"
+    # Guard: only accept when CN office context is present (header or (11) label)
+    cn_context = ("国家知识产权局" in text) or re.search(r"\(11\)\s*(?:公开号|专利号)", text)
+    if cn_context:
+        m = re.search(r"\bCN\s*(\d{7,9})\s*([AB])\b", text)
+        if m:
+            meta["publication_number"] = f"CN{m.group(1)}{m.group(2)}"
 
     # 등록번호 추가 - ZL 패턴
     m = re.search(r"专利号\s*ZL\s*([0-9]+(?:\.[0-9]+)?)", text)
@@ -897,7 +919,9 @@ def _extract_us_metadata(text: str) -> Dict[str, Any]:
         flags=re.I,
     )
     if m:
-        meta["application_number"] = re.sub(r"[\s,]", "", m.group(2))
+        us_app = re.sub(r"[\s,]", "", m.group(2))
+        meta["us_application_number"] = us_app
+        meta["application_number"] = us_app
 
     # Title (sometimes also shown as (54) ...)
     m = re.search(r"\bTitle\b\s*[:\-]?\s*([^\n]+)", text, flags=re.I)
@@ -911,25 +935,43 @@ def _extract_us_metadata(text: str) -> Dict[str, Any]:
     if not m:
         m = re.search(r"\bApplicant\b\s*[:\-]?\s*([^\n]+)", text, flags=re.I)
     if m:
-        meta["assignee"] = m.group(1).strip()
+        ass = m.group(1).strip()
+        # 분류/필드 라벨이 합쳐진 경우 제거
+        ass = re.split(r"\b(Int\.?\s*Cl\.?|U\.?S\.?\s*Cl\.?|CPC|Field\s+of\s+Classification)\b", ass)[0]
+        ass = re.sub(r"\s*\([A-Z]{2}\)\s*$", "", ass)  # (DE) 등 국가코드 제거
+        meta["assignee"] = ass.strip(" ,;")
 
     # Inventors (comma/semicolon/and separated)
     m = re.search(r"\bInventors?\b\s*[:\-]?\s*([^\n]+)", text, flags=re.I)
     if m:
         raw = m.group(1)
+        # 국가코드/괄호 주소 제거
+        raw = re.sub(r"\b[A-Z]{2}\b", "", raw)
+        raw = re.sub(r"\([^\)]*\)", "", raw)
         parts = re.split(r"[;,]|\band\b", raw, flags=re.I)
-        inv = [p.strip() for p in parts if p.strip()]
+        inv = [re.sub(r"\s+", " ", p).strip(" ,;") for p in parts if p.strip()]
         if inv:
             meta["inventors"] = inv
+    # 보강: (72) 블록에서 2차 추출
+    if not meta.get("inventors") or len(meta.get("inventors", [])) < 2:
+        blk72 = re.search(r"\(72\)\s*([\s\S]*?)(?=\(7\d\)\s|\(8\d\)\s|$)", text)
+        if blk72:
+            line = blk72.group(1).split("\n")[0]
+            line = re.sub(r"\b[A-Z]{2}\b", "", line)
+            line = re.sub(r"\([^\)]*\)", "", line)
+            parts = re.split(r"[;,]|\band\b", line, flags=re.I)
+            inv = [re.sub(r"\s+", " ", p).strip(" ,;") for p in parts if p.strip()]
+            if inv:
+                meta["inventors"] = inv
 
     # IPC (Int. Cl.)
-    blk = re.search(r"Int\.?\s*Cl\.?[\s\S]{0,600}", text, flags=re.I)
+    blk = re.search(r"Int\.?\s*Cl\.?[\s\S]{0,600}", _normalize_code_ocr(text), flags=re.I)
     codes = _CODE_RE.findall(blk.group(0)) if blk else []
     if codes:
         meta["ipc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
 
     # CPC
-    blk = re.search(r"\bCPC\b[\s\S]{0,600}", text, flags=re.I)
+    blk = re.search(r"\bCPC\b[\s\S]{0,600}", _normalize_code_ocr(text), flags=re.I)
     codes = _CODE_RE.findall(blk.group(0)) if blk else []
     if codes:
         meta["cpc_codes"] = sorted(list({c.replace("  ", " ").strip() for c in codes}))
@@ -1072,13 +1114,22 @@ def _extract_wo_metadata(text: str) -> Dict[str, Any]:
 
     # Publication number (10): 괄호 번호 기반 인식 → 라벨 언어와 무관
     pub = None
-    m10 = re.search(r"\(10\)[\s\S]{0,180}", text)
+    # 1) (10) 태그로부터 충분한 범위를 캡처 (다음 줄 포함) 후 파싱
+    m10 = re.search(r"\(10\)[\s\S]{0,600}", text)
     if m10:
         pub = _extract_wo_pub_from_text(m10.group(0))
+        if not pub:
+            # (10) 다음 줄만 별도로 시도 (줄 경계 이슈 대비)
+            seg = m10.group(0)
+            lines = [ln for ln in seg.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                pub = _extract_wo_pub_from_text(lines[1])
     if not pub:
         pub = _extract_wo_pub_from_text(text)
     if pub:
         meta["publication_number"] = pub
+        # (10)에서 확정된 경우 관할 고정
+        meta["jurisdiction"] = "WO"
 
     # PCT application number: robust to spaces/newlines and fullwidth digits
     s_norm = (text or "").replace("／", "/")
@@ -1090,7 +1141,10 @@ def _extract_wo_metadata(text: str) -> Dict[str, Any]:
         cc = m.group(1)
         year = _normalize_fullwidth_digits(m.group(2))
         serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(3)))
-        meta["application_number"] = f"PCT/{cc}{year}/{serial}"
+        meta["pct_application_number"] = f"PCT/{cc}{year}/{serial}"
+        # 호환성: 기존 스키마를 사용하는 경우 application_number에 유지할 수도 있으나,
+        # downstream US 병합에서 US 번호를 우선하도록 함
+        meta.setdefault("application_number", meta["pct_application_number"])
 
     # Dates (43) publication, (22) filing
     m = re.search(r"\(43\)[^\n]{0,40}([^\n]+)", text)
@@ -1176,7 +1230,8 @@ def _extract_wo_metadata(text: str) -> Dict[str, Any]:
         cc = m.group(1)
         year = _normalize_fullwidth_digits(m.group(2))
         serial = _normalize_fullwidth_digits(re.sub(r"[\s\u00A0\u202F\u2007\u2060]+", "", m.group(3)))
-        meta["application_number"] = f"PCT/{cc}{year}/{serial}"
+        meta["pct_application_number"] = f"PCT/{cc}{year}/{serial}"
+        meta.setdefault("application_number", meta["pct_application_number"])
     elif "application_number" not in meta:
         m = re.search(
             r"PCT/([A-Z]{2,3})[\s\u00A0\u202F\u2007\u2060]*([0-9０-９]{4})[\s\u00A0\u202F\u2007\u2060]*/[\s\u00A0\u202F\u2007\u2060]*((?:[0-9０-９][\s\u00A0\u202F\u2007\u2060]*){3,})",
@@ -1245,6 +1300,21 @@ def extract_basic_metadata(text: str) -> Dict[str, Any]:
     elif pub.startswith("JP"): meta["jurisdiction"] = "JP"
     elif pub.startswith("CN"): meta["jurisdiction"] = "CN"
     elif pub.startswith("KR"): meta["jurisdiction"] = "KR"
+
+    # Application number priority: if US 문서라면 US (21) 우선, PCT는 보조로 유지
+    try:
+        if meta.get("jurisdiction") == "US":
+            # us_meta에서 온 보조 필드가 병합되었을 수 있으므로 패턴으로 재확인
+            if isinstance(us_meta, dict):
+                us_app = us_meta.get("application_number") or us_meta.get("us_application_number")
+                if us_app and str(us_app).strip():
+                    meta["application_number"] = us_app
+            # 기존 application_number가 PCT로만 채워졌다면 보조 필드로 이동
+            if str(meta.get("application_number", "")).startswith("PCT/"):
+                meta["pct_application_number"] = meta["application_number"]
+                # us_meta가 비어있다면 그대로 두되, 이후 단계에서 개선될 수 있음
+    except Exception:
+        pass
 
     return {k: v for k, v in meta.items() if v not in (None, "", [], {})}
 
