@@ -2,6 +2,9 @@ import io
 import re
 import json
 import hashlib
+import os
+import gzip
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
@@ -13,6 +16,95 @@ except Exception:  # optional OCR deps may not be installed at runtime
     convert_from_bytes = None  # type: ignore
     pytesseract = None  # type: ignore
     Image = None  # type: ignore
+
+
+# ---------------- WIPS index loading and matching (prebuilt JSON) ----------------
+_WIPS_INDEX_CACHE: Optional[Dict[str, Any]] = None
+
+def _default_wips_index_path() -> Optional[str]:
+    base = os.path.dirname(__file__)
+    cand = os.path.join(base, "data", "wips_index.json")
+    if os.path.exists(cand):
+        return cand
+    gz = cand + ".gz"
+    if os.path.exists(gz):
+        return gz
+    return None
+
+def load_wips_index_json(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    global _WIPS_INDEX_CACHE
+    if _WIPS_INDEX_CACHE is not None:
+        return _WIPS_INDEX_CACHE
+    path = path or os.getenv("WIPS_INDEX_PATH") or _default_wips_index_path()
+    if not path:
+        return None
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8") as f:
+        _WIPS_INDEX_CACHE = json.load(f)
+    return _WIPS_INDEX_CACHE
+
+def _fw_to_ascii(s: str) -> str:
+    return "".join(unicodedata.normalize("NFKC", ch) for ch in str(s or ""))
+
+def _norm_alnum(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", _fw_to_ascii(s).upper())
+
+def _digits_only(s: str) -> str:
+    return re.sub(r"[^0-9]", "", _fw_to_ascii(s))
+
+def _variants_for_id(s: str) -> List[str]:
+    if not s:
+        return []
+    raw = _fw_to_ascii(s).strip().upper()
+    base = _norm_alnum(raw)
+    cand: List[str] = [base]
+    # strip terminal kind like A1/B2
+    cand.append(re.sub(r"([A-Z0-9])([A-Z][0-9])$", r"\1", base))
+    d = _digits_only(raw)
+    if d:
+        cand.append(d)
+    out = [x for x in dict.fromkeys(cand) if x]
+    out.sort(key=lambda z: (-len(z), z))
+    return out
+
+def match_wips_from_index(meta: Dict[str, Any], index_path: Optional[str]) -> Optional[str]:
+    idx = load_wips_index_json(index_path)
+    if not idx:
+        return None
+    exact: Dict[str, str] = idx.get("exact", {})
+    suffix: Dict[str, Dict[str, List[str]]] = idx.get("suffix", {})
+
+    candidates: List[str] = []
+    for k in ("publication_number", "application_number", "registration_number"):
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            candidates.extend(_variants_for_id(v))
+
+    # exact match
+    for c in candidates:
+        if c in exact:
+            return exact[c]
+
+    # digits-only exact
+    for c in candidates:
+        d = _digits_only(c)
+        if d and d in exact:
+            return exact[d]
+
+    # unique suffix match (8 -> 9 -> 7)
+    for n in ("8", "9", "7"):
+        hits: List[str] = []
+        for c in candidates:
+            d = _digits_only(c)
+            if not d or len(d) < int(n):
+                continue
+            ks = suffix.get(n, {}).get(d[-int(n):], [])
+            if ks:
+                hits.extend(ks)
+        hits = list(dict.fromkeys(hits))
+        if len(hits) == 1 and hits[0] in exact:
+            return exact[hits[0]]
+    return None
 
 
 def clean_text(text: str) -> str:
@@ -1325,6 +1417,7 @@ def convert_pdf_bytes_to_patent_json(
     file_name: str,
     target_tokens: int = 600,
     overlap_tokens: int = 80,
+    wips_index_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Convert PDF bytes into a patent-oriented JSON doc and RAG chunks.
 
@@ -1421,6 +1514,14 @@ def convert_pdf_bytes_to_patent_json(
 
     # Metadata extraction (KR-aware, pruned)
     meta = extract_basic_metadata(cleaned)
+
+    # Inject WIPS URL from prebuilt index if available
+    try:
+        wips_on = match_wips_from_index(meta, wips_index_path)
+        if wips_on:
+            meta["wips_url"] = f"http://newsd.wips.co.kr/wipslink/api/dkrdshtm.wips?skey={wips_on}"
+    except Exception:
+        pass
 
     # Build document JSON
     doc_id = hashlib.md5((file_name + str(len(cleaned))).encode("utf-8")).hexdigest()
